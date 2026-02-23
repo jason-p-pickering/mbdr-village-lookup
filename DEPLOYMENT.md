@@ -1,62 +1,126 @@
 # Deployment Notes
 
-## Prerequisites
+## Infrastructure
 
-- Python 3.10+
-- PostgreSQL 12+ with `pg_trgm` extension (included in `postgresql-contrib`)
-- Access to the DHIS2 server from the deployment host
-
-```bash
-# Install contrib if not already present
-sudo apt install postgresql-contrib
+```
+Host machine
+├── proxy          (172.19.2.2)   — nginx reverse proxy
+├── dhis           (172.19.2.11)  — DHIS2 (Tomcat, port 8080)
+├── postgres       (172.19.2.20)  — PostgreSQL
+├── monitor        (172.19.2.30)  — monitoring
+└── village-lookup (172.19.2.45)  — this microservice (port 8000)
 ```
 
 ---
 
-## 1. Get the code onto the server
+## 1. Create the LXC container
+
+Run on the host:
 
 ```bash
-# Option A: copy from dev
-scp -r village-lookup/ user@server:/opt/village-lookup
+lxc launch ubuntu:22.04 village-lookup
+```
 
-# Option B: git clone (if you've pushed to a repo)
-git clone <repo-url> /opt/village-lookup
+Verify it got 172.19.2.45:
+
+```bash
+lxc list village-lookup
 ```
 
 ---
 
-## 2. Create a virtualenv and install dependencies
+## 2. Set up PostgreSQL access
+
+### Create the database and user
+
+Run on the host (executes inside the postgres container):
 
 ```bash
-cd /opt/village-lookup
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+lxc exec postgres -- sudo -u postgres psql -c "CREATE USER village WITH PASSWORD 'choose-a-password';"
+lxc exec postgres -- sudo -u postgres psql -c "CREATE DATABASE village_lookup OWNER village;"
+```
+
+### Allow the village-lookup container in pg_hba.conf
+
+On the postgres container, add this line to `/etc/postgresql/*/main/pg_hba.conf`:
+
+```
+host  village_lookup  village  172.19.2.45/32  scram-sha-256
+```
+
+Then reload:
+
+```bash
+lxc exec postgres -- sudo systemctl reload postgresql
+```
+
+### Open the firewall on the postgres container
+
+```bash
+lxc exec postgres -- ufw allow from 172.19.2.45 to any port 5432 comment "village-lookup"
+```
+
+Verify:
+
+```bash
+lxc exec postgres -- ufw status
 ```
 
 ---
 
-## 3. Create the database
+## 3. Allow microservice to reach DHIS2
+
+On the **dhis** container, open port 8080 to the village-lookup container:
 
 ```bash
-sudo -u postgres psql -c "CREATE USER village_lookup WITH PASSWORD 'choose-a-password';"
-sudo -u postgres psql -c "CREATE DATABASE village_lookup OWNER village_lookup;"
+lxc exec dhis -- ufw allow from 172.19.2.45 to any port 8080 comment "village-lookup"
+```
+
+Verify:
+
+```bash
+lxc exec dhis -- ufw status
 ```
 
 ---
 
-## 4. Configure the environment
+## 4. Get the code onto the container
 
 ```bash
-cp .env.example .env
-nano .env
+# Option A: copy from dev machine
+scp -r village-lookup/ user@host:/tmp/village-lookup
+lxc file push -r /tmp/village-lookup host:/opt/village-lookup
+
+# Option B: git clone inside the container
+lxc exec village-lookup -- git clone <repo-url> /opt/village-lookup
+```
+
+---
+
+## 5. Install dependencies
+
+```bash
+lxc exec village-lookup -- apt update
+lxc exec village-lookup -- apt install -y python3 python3-pip python3-venv python3-dev libpq-dev
+lxc exec village-lookup -- bash -c "cd /opt/village-lookup && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+```
+
+> `python3-dev` and `libpq-dev` are required to compile `asyncpg` during `pip install`.
+
+---
+
+## 6. Configure the environment
+
+```bash
+lxc exec village-lookup -- bash -c "cp /opt/village-lookup/.env.example /opt/village-lookup/.env"
+lxc exec village-lookup -- nano /opt/village-lookup/.env
 ```
 
 Fill in `.env`:
 
 ```
-DATABASE_URL=postgresql+asyncpg://village_lookup:choose-a-password@localhost/village_lookup
-DHIS2_BASE_URL=https://your-dhis2-server
+DATABASE_URL=postgresql+asyncpg://village:choose-a-password@172.19.2.20:5432/village_lookup
+DHIS2_BASE_URL=http://172.19.2.11:8080
 DHIS2_USERNAME=admin
 DHIS2_PASSWORD=
 TOWNSHIP_OPTIONSET_UID=YNtzjFwAJVU
@@ -67,30 +131,29 @@ VILLAGE_OPTIONSET_UID=IV5XD8XjxYl
 Lock down the file:
 
 ```bash
-chmod 600 .env
+lxc exec village-lookup -- chmod 600 /opt/village-lookup/.env
 ```
 
 ---
 
-## 5. Run database migrations
+## 7. Run database migrations
 
 ```bash
-source .venv/bin/activate
-alembic upgrade head
+lxc exec village-lookup -- bash -c "cd /opt/village-lookup && .venv/bin/alembic upgrade head"
 ```
 
 ---
 
-## 6. Load data from DHIS2
+## 8. Load data from DHIS2
 
 This takes a few minutes (65k villages):
 
 ```bash
-source .venv/bin/activate
-python scripts/load_dhis2.py
+lxc exec village-lookup -- bash -c "cd /opt/village-lookup && .venv/bin/python scripts/load_dhis2.py"
 ```
 
 Expected output:
+
 ```
 Fetching townships options ...  → 331 townships
 Fetching wards options ...      → 3486 wards
@@ -110,177 +173,153 @@ Done.
 
 ---
 
-## 7. Run as a systemd service
+## 9. Run as a systemd service
 
-Create `/etc/systemd/system/village-lookup.service`:
+Create `/etc/systemd/system/village-lookup.service` inside the container:
 
-```ini
+```bash
+lxc exec village-lookup -- bash -c "cat > /etc/systemd/system/village-lookup.service" << 'EOF'
 [Unit]
 Description=Village Lookup Microservice
-After=network.target postgresql.service
+After=network.target
 
 [Service]
 Type=simple
 User=www-data
 WorkingDirectory=/opt/village-lookup
 EnvironmentFile=/opt/village-lookup/.env
-ExecStart=/opt/village-lookup/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8080
+ExecStart=/opt/village-lookup/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
+EOF
 ```
 
-> Adjust `User=` to whichever system user you want the process to run as.
-> Make sure that user can read `/opt/village-lookup/.env`.
+Enable and start:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable village-lookup
-sudo systemctl start village-lookup
-sudo systemctl status village-lookup
+lxc exec village-lookup -- systemctl daemon-reload
+lxc exec village-lookup -- systemctl enable village-lookup
+lxc exec village-lookup -- systemctl start village-lookup
+lxc exec village-lookup -- systemctl status village-lookup
 ```
 
 ---
 
-## 8. Nginx reverse proxy
+## 10. Configure nginx on the proxy container
 
-nginx sits in front of both DHIS2 (port 8080) and the microservice (port 8081).
-It intercepts `POST /api/tracker` and routes it through the microservice for
-validation. All other traffic goes straight to DHIS2.
+Edit the nginx site config on the proxy container. Two changes are needed:
+
+### 1. Add a `map` block in `http{}`
+
+Outside the `server{}` block, add:
 
 ```nginx
-server {
-    listen 80;
-    server_name your-server;
-
-    # Synchronous tracker submissions → microservice (validates, then relays)
-    location = /api/tracker {
-        proxy_pass          http://127.0.0.1:8081/proxy/tracker;
-        proxy_pass_header   Cookie;
-        proxy_set_header    Host $host;
-        proxy_set_header    X-Real-IP $remote_addr;
-        proxy_read_timeout  60s;
-    }
-
-    # Everything else → DHIS2 directly
-    location / {
-        proxy_pass          http://127.0.0.1:8080;
-        proxy_set_header    Host $host;
-        proxy_set_header    X-Real-IP $remote_addr;
-    }
+map $request_method $tracker_upstream {
+    POST    http://172.19.2.45:8000/proxy/tracker;
+    default http://172.19.2.11:8080/dhis/api/tracker;
 }
 ```
 
-**How the proxy route works:**
+This routes POST submissions through the microservice for validation and passes
+all other methods (GET, etc.) straight to DHIS2.
 
-- `async=true` or no `async` param → microservice relays straight to DHIS2,
-  no validation (async jobs are not intercepted)
-- `async=false` + program != `cUjoGJK4gPL` → relayed straight through
-- `async=false` + program `cUjoGJK4gPL` + inconsistent address → **409** returned
-  to client, submission blocked
-- `async=false` + program `cUjoGJK4gPL` + valid (or empty) address → relayed to
-  DHIS2, DHIS2 response returned to client unchanged
+### 2. Add location blocks inside `server{}`
 
----
+```nginx
+# Tracker submissions — POST goes to microservice, everything else to DHIS2
+location = /dhis/api/tracker {
+    proxy_pass     $tracker_upstream$is_args$args;
+    include        /etc/nginx/proxy_params;
+    proxy_redirect off;
+}
 
-## 9. Verify the deployment
+# Village/ward/township lookup
+location /lookup/ {
+    proxy_pass     http://172.19.2.45:8000/;
+    include        /etc/nginx/proxy_params;
+    proxy_redirect off;
+}
+
+```
+
+Test and reload:
 
 ```bash
-# Health check
-curl http://localhost:8080/health
-
-# Townships (should return 331)
-curl http://localhost:8080/townships | python3 -c "import json,sys; t=json.load(sys.stdin); print(len(t), 'townships')"
-
-# Ward search
-curl "http://localhost:8080/wards?township_uid=hMKEafGDKdQ&q=hman"
-
-# Village search
-curl "http://localhost:8080/villages?township_uid=hMKEafGDKdQ&q=gyo"
-
-# Validation
-curl -s -X POST http://localhost:8080/validate \
-  -H "Content-Type: application/json" \
-  -d '{"events":[{"event":"test","dataValues":[
-    {"dataElement":"QcFEXzah0f1","value":"Amarapura"},
-    {"dataElement":"hQnTVzOd0m9","value":"Urban"},
-    {"dataElement":"ZT3zBscjD24","value":"Lut Lat Yay Ward - Ahlone"}
-  ]}]}'
-# Expected: {"valid":false,...}
+lxc exec proxy -- nginx -t
+lxc exec proxy -- systemctl reload nginx
 ```
 
 ---
 
-## 10. Re-loading data after DHIS2 changes
+## 11. Verify the deployment
+
+```bash
+# Health check (from host or proxy container)
+curl http://172.19.2.45:8000/health
+
+# Townships (should return 331)
+curl http://172.19.2.45:8000/townships | python3 -c "import json,sys; t=json.load(sys.stdin); print(len(t), 'townships')"
+
+# Ward search (Amarapura)
+curl "http://172.19.2.45:8000/wards?township_uid=hMKEafGDKdQ&q=hman"
+
+# Village search (Amarapura)
+curl "http://172.19.2.45:8000/villages?township_uid=hMKEafGDKdQ&q=gyo"
+```
+
+---
+
+## 12. Re-loading data after DHIS2 changes
 
 When option sets or option groups are updated in DHIS2, re-run the loader.
 It uses `ON CONFLICT ... DO UPDATE` so it is safe to run repeatedly — no need
 to wipe the database first.
 
 ```bash
-cd /opt/village-lookup
-source .venv/bin/activate
-python scripts/load_dhis2.py
-sudo systemctl restart village-lookup   # refresh the in-memory townships cache
+lxc exec village-lookup -- bash -c "cd /opt/village-lookup && .venv/bin/python scripts/load_dhis2.py"
+lxc exec village-lookup -- systemctl restart village-lookup   # refresh in-memory townships cache
 ```
 
 ---
 
-## Port note
+## API Reference
 
-The dev DHIS2 instance runs on port 8080. If you deploy this service on the
-**same host** as DHIS2, change the uvicorn port in the systemd unit (e.g. 8081)
-and update the nginx proxy accordingly.
+### `GET /health`
+```bash
+curl http://172.19.2.45:8000/health
+# {"status": "ok"}
+```
 
-## API Usage
+### `GET /townships`
+Returns all 331 townships. Use the returned UIDs for the other endpoints.
+```bash
+curl http://172.19.2.45:8000/townships
+```
 
----                                                                                                                                                                                        
-  GET /health                                                                                                                                                                                
-                                                                                                                                                                                             
-  Simple liveness check.                                                                                                                                                                     
-  curl http://localhost:8000/health                                                                                                                                                          
-  Response: {"status": "ok"}
+### `GET /wards`
 
-  ---
-  GET /townships
+| Param | Required | Description |
+|---|---|---|
+| `township_uid` | yes | DHIS2 UID from `/townships` |
+| `q` | no | Name search (fuzzy, case-insensitive) |
+| `limit` | no | Default 50, max 200 |
 
-  Returns all townships (loaded from DB into memory at startup). Use these UIDs for the other endpoints.
-  curl http://localhost:8000/townships
-  Response: [{"uid": "hMKEafGDKdQ", "code": "...", "name": "Amarapura"}, ...]
+```bash
+curl "http://172.19.2.45:8000/wards?township_uid=hMKEafGDKdQ"
+curl "http://172.19.2.45:8000/wards?township_uid=hMKEafGDKdQ&q=shwe"
+```
 
-  ---
-  GET /wards
+### `GET /villages`
+Same params as `/wards`.
 
-  Search urban wards within a township.
+```bash
+curl "http://172.19.2.45:8000/villages?township_uid=hMKEafGDKdQ"
+curl "http://172.19.2.45:8000/villages?township_uid=hMKEafGDKdQ&q=gyo"
+```
 
-  ┌──────────────┬──────────┬──────────────────────────────────────────────┐
-  │    Param     │ Required │                 Description                  │
-  ├──────────────┼──────────┼──────────────────────────────────────────────┤
-  │ township_uid │ yes      │ DHIS2 UID from /townships                    │
-  ├──────────────┼──────────┼──────────────────────────────────────────────┤
-  │ q            │ no       │ Name search string (fuzzy, case-insensitive) │
-  ├──────────────┼──────────┼──────────────────────────────────────────────┤
-  │ limit        │ no       │ Default 50, max 200                          │
-  └──────────────┴──────────┴──────────────────────────────────────────────┘
+**Response fields** (all endpoints): `uid`, `code`, `name`, `name_my`
 
-  # All wards for Amarapura
-  curl "http://localhost:8000/wards?township_uid=hMKEafGDKdQ"
-
-  # Search within Amarapura
-  curl "http://localhost:8000/wards?township_uid=hMKEafGDKdQ&q=shwe"
-
-  # With limit
-  curl "http://localhost:8000/wards?township_uid=hMKEafGDKdQ&q=shwe&limit=10"
-
-  ---
-  GET /villages
-
-  Search rural villages within a township. Same params as /wards.
-
-  # All villages for Amarapura
-  curl "http://localhost:8000/villages?township_uid=hMKEafGDKdQ"
-
-  # Search within Amarapura
-  curl "http://localhost:8000/villages?township_uid=hMKEafGDKdQ&q=gyo"
+Interactive docs available at `http://172.19.2.45:8000/docs`.
