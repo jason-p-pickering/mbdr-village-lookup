@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from app.database import AsyncSessionLocal
 from app.models import Township
+from app.routers.icd10 import router as icd10_router
 from app.routers.proxy import router as proxy_router
 from app.routers.validate import router as validate_router
 from app.routers.villages import router as villages_router
@@ -31,10 +32,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Village Lookup", lifespan=lifespan)
 
 
+_CACHED_PATHS = {"/townships", "/wards", "/villages"}
+
+
 @app.middleware("http")
 async def add_cache_headers(request: Request, call_next):
     response = await call_next(request)
-    response.headers["Cache-Control"] = "private, max-age=3600"
+    if request.url.path in _CACHED_PATHS:
+        response.headers["Cache-Control"] = "private, max-age=3600"
     return response
 
 
@@ -44,5 +49,6 @@ async def health():
 
 
 app.include_router(villages_router)
+app.include_router(icd10_router)
 app.include_router(validate_router)
 app.include_router(proxy_router)

@@ -126,6 +126,7 @@ DHIS2_PASSWORD=
 TOWNSHIP_OPTIONSET_UID=YNtzjFwAJVU
 WARD_OPTIONSET_UID=tL47jSni11v
 VILLAGE_OPTIONSET_UID=IV5XD8XjxYl
+ICD10_OPTIONSET_UID=MDNwHnWn2Ik
 ```
 
 Lock down the file:
@@ -155,14 +156,16 @@ lxc exec village-lookup -- bash -c "cd /opt/village-lookup && .venv/bin/python s
 Expected output:
 
 ```
-Fetching townships options ...  → 331 townships
-Fetching wards options ...      → 3486 wards
-Fetching villages options ...   → 64960 villages
+Fetching townships options ...   → 331 townships
+Fetching wards options ...       → 3486 wards
+Fetching villages options ...    → 64960 villages
+Fetching ICD10 codes options ... → 10616 ICD10 codes
 ...
 Done.
-  Townships : 331
-  Wards     : 3381
-  Villages  : 63081
+  Townships  : 331
+  Wards      : 3381
+  Villages   : 63081
+  ICD10 codes: 10616
 ```
 
 > **Note:** 37 option groups could not be matched to a township due to naming
@@ -320,6 +323,36 @@ curl "http://172.19.2.45:8000/villages?township_uid=hMKEafGDKdQ"
 curl "http://172.19.2.45:8000/villages?township_uid=hMKEafGDKdQ&q=gyo"
 ```
 
-**Response fields** (all endpoints): `uid`, `code`, `name`, `name_my`
+**Response fields** (wards/villages): `uid`, `code`, `name`, `name_my`
+
+---
+
+### `GET /icd10`
+
+External URL (via nginx): `/lookup/icd10`
+
+| Param | Required | Description |
+|---|---|---|
+| `q` | no | Search term — matches ICD10 code (e.g. `A00`) or description (e.g. `cholera`), case-insensitive |
+| `page` | no | Page number, default 1 |
+| `limit` | no | Default 50, max 200 |
+
+```bash
+curl "http://172.19.2.45:8000/icd10?q=cholera"
+curl "http://172.19.2.45:8000/icd10?q=A00"
+curl "http://172.19.2.45:8000/icd10?page=2&limit=100"
+```
+
+**Response:**
+```json
+{
+  "page": 1,
+  "limit": 50,
+  "total": 6,
+  "results": [
+    {"uid": "...", "code": "100.9", "icd_code": "A00.9", "name": "A00.9 Cholera, unspecified"}
+  ]
+}
+```
 
 Interactive docs available at `http://172.19.2.45:8000/docs`.

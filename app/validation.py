@@ -9,6 +9,7 @@ from app.routers.validate import (
     DE_LOCATION,
     DE_WARD,
     DE_VILLAGE,
+    DE_ICD10_FIELDS,
     ValidationError,
     extract,
 )
@@ -27,6 +28,14 @@ async def check_ward(db: AsyncSession, township_code: str, ward_code: str) -> bo
             """
         ),
         {"township_code": township_code, "ward_code": ward_code},
+    )
+    return row.first() is not None
+
+
+async def check_icd10_code(db: AsyncSession, code: str) -> bool:
+    row = await db.execute(
+        text("SELECT 1 FROM icd10_codes WHERE code = :code LIMIT 1"),
+        {"code": code},
     )
     return row.first() is not None
 
@@ -50,31 +59,42 @@ async def check_village(db: AsyncSession, township_code: str, village_code: str)
 
 async def validate_event(db: AsyncSession, event_uid: str, data_values: list) -> list[ValidationError]:
     """
-    Validate address consistency for a single event's data values.
+    Validate a single event's data values.
+    Checks address hierarchy consistency and ICD10 code validity.
     Returns a list of ValidationError (empty = valid).
     """
+    errors: list[ValidationError] = []
+
+    # ── Address validation ───────────────────────────────────────────────────
     township_code = extract(data_values, DE_TOWNSHIP)
     location      = extract(data_values, DE_LOCATION)
     ward_code     = extract(data_values, DE_WARD)
     village_code  = extract(data_values, DE_VILLAGE)
 
-    if not township_code or not location:
-        return []
+    if township_code and location:
+        if location == "Urban":
+            if ward_code and not await check_ward(db, township_code, ward_code):
+                errors.append(ValidationError(
+                    event=event_uid,
+                    field=DE_WARD,
+                    message=f"Ward '{ward_code}' does not belong to township '{township_code}'.",
+                ))
+        elif location == "Rural":
+            if village_code and not await check_village(db, township_code, village_code):
+                errors.append(ValidationError(
+                    event=event_uid,
+                    field=DE_VILLAGE,
+                    message=f"Village '{village_code}' does not belong to township '{township_code}'.",
+                ))
 
-    if location == "Urban":
-        if ward_code and not await check_ward(db, township_code, ward_code):
-            return [ValidationError(
+    # ── ICD10 validation ─────────────────────────────────────────────────────
+    for de_uid, de_name in DE_ICD10_FIELDS.items():
+        value = extract(data_values, de_uid)
+        if value and not await check_icd10_code(db, value):
+            errors.append(ValidationError(
                 event=event_uid,
-                field=DE_WARD,
-                message=f"Ward '{ward_code}' does not belong to township '{township_code}'.",
-            )]
+                field=de_uid,
+                message=f"'{value}' is not a valid ICD10 code ({de_name}).",
+            ))
 
-    elif location == "Rural":
-        if village_code and not await check_village(db, township_code, village_code):
-            return [ValidationError(
-                event=event_uid,
-                field=DE_VILLAGE,
-                message=f"Village '{village_code}' does not belong to township '{township_code}'.",
-            )]
-
-    return []
+    return errors

@@ -26,3 +26,19 @@ class VillageOut(BaseModel):
     name_my: str | None
 
     model_config = {"from_attributes": True}
+
+
+class ICD10Out(BaseModel):
+    uid: str
+    code: str | None
+    icd_code: str | None
+    name: str
+
+    model_config = {"from_attributes": True}
+
+
+class ICD10Page(BaseModel):
+    page: int
+    limit: int
+    total: int
+    results: list[ICD10Out]

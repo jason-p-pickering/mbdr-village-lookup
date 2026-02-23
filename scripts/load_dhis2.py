@@ -33,6 +33,7 @@ DHIS2_PASSWORD = os.environ["DHIS2_PASSWORD"]
 TOWNSHIP_OPTIONSET_UID = os.environ["TOWNSHIP_OPTIONSET_UID"]
 WARD_OPTIONSET_UID = os.environ["WARD_OPTIONSET_UID"]
 VILLAGE_OPTIONSET_UID = os.environ["VILLAGE_OPTIONSET_UID"]
+ICD10_OPTIONSET_UID = os.environ.get("ICD10_OPTIONSET_UID", "MDNwHnWn2Ik")
 DATABASE_URL = os.environ["DATABASE_URL"]
 
 BATCH_SIZE = 1000
@@ -185,6 +186,35 @@ async def upsert_in_batches(session, table: str, rows: list[dict]) -> None:
     print()
 
 
+def extract_icd_code(name: str) -> str | None:
+    """Return the ICD10 code prefix at the start of the name (e.g. 'A00.0')."""
+    parts = name.split(" ", 1)
+    return parts[0] if parts[0] else None
+
+
+async def upsert_icd10(session, options: list[dict]) -> None:
+    total = len(options)
+    for i in range(0, total, BATCH_SIZE):
+        batch = options[i : i + BATCH_SIZE]
+        await session.execute(
+            text(
+                """
+                INSERT INTO icd10_codes (uid, code, icd_code, name)
+                VALUES (:uid, :code, :icd_code, :name)
+                ON CONFLICT (uid) DO UPDATE
+                  SET code     = EXCLUDED.code,
+                      icd_code = EXCLUDED.icd_code,
+                      name     = EXCLUDED.name
+                """
+            ),
+            batch,
+        )
+        await session.commit()
+        done = min(i + BATCH_SIZE, total)
+        print(f"  icd10_codes: {done}/{total}", end="\r", flush=True)
+    print()
+
+
 async def main() -> None:
     engine = create_async_engine(DATABASE_URL, echo=False)
     Session = async_sessionmaker(engine, expire_on_commit=False)
@@ -194,6 +224,7 @@ async def main() -> None:
         ward_opts = fetch_options_with_translations(client, WARD_OPTIONSET_UID, "wards")
         village_opts = fetch_options_with_translations(client, VILLAGE_OPTIONSET_UID, "villages")
         option_groups = fetch_option_groups(client)
+        icd10_raw = fetch_options_with_translations(client, ICD10_OPTIONSET_UID, "ICD10 codes")
 
     print("Building township linkage from option groups ...")
     ward_link, village_link = build_linkage(township_opts, option_groups)
@@ -224,11 +255,25 @@ async def main() -> None:
     async with Session() as session:
         await upsert_in_batches(session, "villages", village_rows)
 
+    icd10_rows = [
+        {
+            "uid": v["uid"],
+            "code": v["code"],
+            "icd_code": extract_icd_code(v["name"]),
+            "name": v["name"],
+        }
+        for v in icd10_raw.values()
+    ]
+    print(f"Upserting {len(icd10_rows)} ICD10 codes ...")
+    async with Session() as session:
+        await upsert_icd10(session, icd10_rows)
+
     await engine.dispose()
     print("\nDone.")
-    print(f"  Townships : {len(uid_to_db_id)}")
-    print(f"  Wards     : {len(ward_rows)}")
-    print(f"  Villages  : {len(village_rows)}")
+    print(f"  Townships  : {len(uid_to_db_id)}")
+    print(f"  Wards      : {len(ward_rows)}")
+    print(f"  Villages   : {len(village_rows)}")
+    print(f"  ICD10 codes: {len(icd10_rows)}")
 
 
 if __name__ == "__main__":

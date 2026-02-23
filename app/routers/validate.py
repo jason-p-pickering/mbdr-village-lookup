@@ -12,6 +12,14 @@ DE_LOCATION = "hQnTVzOd0m9"   # Permanent Address - Ward/Village Location (Urban
 DE_WARD     = "ZT3zBscjD24"   # Permanent Address - Ward Name
 DE_VILLAGE  = "C5ppG8eJSKs"   # Permanent Address - Village Name
 
+# Data element UIDs for ICD10 cause-of-death fields (Death Register program)
+DE_ICD10_FIELDS = {
+    "TJlsMB053WZ": "CoD - Cause of Death I A",
+    "Wntbkbl2ext": "CoD - Cause of Death I B",
+    "auAvndfLb5x": "CoD - Cause of Death I C",
+    "nQy5xQrOMXj": "CoD - Underlying Cause of Death",
+}
+
 
 # ── Incoming payload schema ─────────────────────────────────────────────────
 

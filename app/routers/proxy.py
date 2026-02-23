@@ -11,7 +11,10 @@ from app.validation import validate_event
 
 router = APIRouter()
 
-TARGET_PROGRAM = "cUjoGJK4gPL"
+TARGET_PROGRAMS = {
+    "cUjoGJK4gPL",   # MBDR
+    "TXuxHniKS6l",   # Death register
+}
 DHIS2_TRACKER_URL = f"{settings.DHIS2_BASE_URL}/api/tracker"
 VALIDATION_ERROR_CODE = "E1301"  # custom code: address hierarchy mismatch
 
@@ -59,7 +62,7 @@ async def proxy_tracker(
     events = payload.get("events", [])
 
     # Only validate events for the target program — relay the rest unchanged
-    target_events = [e for e in events if e.get("program") == TARGET_PROGRAM]
+    target_events = [e for e in events if e.get("program") in TARGET_PROGRAMS]
     if not target_events:
         return await relay(request, body, params)
 
