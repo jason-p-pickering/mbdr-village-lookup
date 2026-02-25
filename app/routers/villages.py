@@ -13,9 +13,12 @@ async def list_townships(request: Request):
     return request.app.state.townships_cache
 
 
+DHIS2_UID_PATTERN = r"^[A-Za-z][A-Za-z0-9]{10}$"
+
+
 @router.get("/wards", response_model=list[WardOut])
 async def search_wards(
-    township_uid: str = Query(..., description="DHIS2 UID of the township"),
+    township_uid: str = Query(..., pattern=DHIS2_UID_PATTERN, description="DHIS2 UID of the township (11 chars, starts with a letter)"),
     q: str | None = Query(None, description="Ward name search string"),
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
@@ -51,7 +54,7 @@ async def search_wards(
 
 @router.get("/villages", response_model=list[VillageOut])
 async def search_villages(
-    township_uid: str = Query(..., description="DHIS2 UID of the township"),
+    township_uid: str = Query(..., pattern=DHIS2_UID_PATTERN, description="DHIS2 UID of the township (11 chars, starts with a letter)"),
     q: str | None = Query(None, description="Village name search string"),
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
