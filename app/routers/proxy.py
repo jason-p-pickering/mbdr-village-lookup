@@ -50,10 +50,6 @@ async def proxy_tracker(
     body = await request.body()
     params = dict(request.query_params)
 
-    # Only validate synchronous submissions — relay everything else straight through
-    if params.get("async") != "false":
-        return await relay(request, body, params)
-
     try:
         payload = json.loads(body)
     except json.JSONDecodeError:
